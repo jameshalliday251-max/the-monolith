@@ -6,9 +6,6 @@ import time
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
-# We will perform the search manually to ensure we can switch mirrors
-# This removes the dependency on the flaky LibgenSearch library
-
 app = Flask(__name__)
 CORS(app)
 
@@ -17,13 +14,15 @@ LIBRARY_PATH = "/app/library"
 if not os.path.exists(LIBRARY_PATH):
     os.makedirs(LIBRARY_PATH)
 
-# --- MIRROR LIST ---
-# The Monolith will try these in order until one works.
+# --- COMPATIBLE MIRRORS ONLY ---
+# We removed .li and others because they break the search pattern.
+# We prioritize .is and .rs as they are the standard-bearers.
 MIRRORS = [
     "http://libgen.is",
     "http://libgen.rs",
     "http://libgen.st",
-    "http://libgen.li"
+    "http://www.libgen.is", 
+    "http://www.libgen.rs"
 ]
 
 def clean_text(text):
@@ -34,52 +33,39 @@ def clean_text(text):
     return safe_text
 
 def manual_search(query):
-    """
-    Manually searches LibGen mirrors using raw HTTP requests.
-    This bypasses the broken/old library and handles ISP blocks.
-    """
     out = []
     
-    # 1. Try each mirror
+    # Try each mirror in order
     for mirror in MIRRORS:
-        print(f"Monolith: Trying uplink to {mirror}...")
+        print(f"Monolith: Pinging {mirror}...")
         try:
-            # Construct search URL (Simple search, sorting by default)
+            # Search URL for standard LibGen (Simple, Column=Default)
             search_url = f"{mirror}/search.php?req={query}&res=25&view=simple&phrase=1&column=def"
             
-            # Short timeout (10s) so we don't hang forever
-            r = requests.get(search_url, timeout=10)
+            # TIGHT TIMEOUT: Fail fast (5s) so we can try the next mirror quickly
+            r = requests.get(search_url, timeout=5)
             
             if r.status_code != 200:
-                print(f"Monolith: {mirror} returned status {r.status_code}. Skipping.")
+                print(f"Monolith: {mirror} unreachable (Status {r.status_code}).")
                 continue
-                
-            # 2. Parse HTML using Regex (Fast, no extra libraries needed)
-            # We look for rows that contain download links
-            # This regex looks for the table rows and extracts IDs and basic info
-            # It's a bit "hacky" but very robust against library version issues.
-            
-            # Find all table rows
-            # This pattern is specific to LibGen's search.php output
-            # We are looking for the 'ID' which lets us build the download link
-            
-            # Simpler approach: Extract the MD5 hashes which are the keys to the files
-            # LibGen search results usually have links like 'book/index.php?md5=...'
-            
+
+            # REGEX PARSING (Standard Layout Only)
+            # 1. Find the MD5 hashes (The DNA of the file)
+            # Pattern: matches href="book/index.php?md5=..."
             md5_pattern = r'href="book/index\.php\?md5=([A-Fa-f0-9]{32})"'
             md5s = re.findall(md5_pattern, r.text)
             
             if not md5s:
-                print(f"Monolith: Connected to {mirror} but found no artifacts (or parsing failed).")
-                continue
+                # If we connected but found no MD5s, the site might be up but showing a captcha or error.
+                # Or simply no results found.
+                print(f"Monolith: Connection good, but no artifacts found on {mirror}.")
+                continue # Try next mirror just in case
                 
             print(f"Monolith: Lock on! Found {len(md5s)} artifacts on {mirror}.")
             
-            # Now we need to fetch details for these MD5s
-            # LibGen has a hidden API: /json.php?ids=... or fields=...
-            # We can use this to get clean metadata quickly!
-            
-            ids_to_check = ",".join(md5s[:15]) # Check first 15
+            # 2. Get Metadata (Using the bulk JSON API)
+            # This is much faster than scraping every page
+            ids_to_check = ",".join(md5s[:15]) 
             json_url = f"{mirror}/json.php?ids={ids_to_check}&fields=id,title,author,year,extension,md5,filesize"
             
             meta_r = requests.get(json_url, timeout=10)
@@ -89,10 +75,8 @@ def manual_search(query):
                 ext = item.get('extension', '').lower()
                 if ext not in ['pdf', 'epub']: continue
                 
-                # Build the direct download gateway
-                # The most reliable way is often http://library.lol/main/{md5}
-                # But we can also use the mirror's own gateway
                 md5 = item.get('md5')
+                # Use library.lol as the primary gateway (most reliable)
                 dl_url = f"http://library.lol/main/{md5}"
                 
                 out.append({
@@ -100,54 +84,46 @@ def manual_search(query):
                     "author": clean_text(item.get('author')),
                     "year": item.get('year'),
                     "extension": ext,
-                    "size": item.get('filesize'), # LibGen JSON might return bytes, but frontend handles string
+                    "size": item.get('filesize'),
                     "download_url": dl_url
                 })
             
-            # If we got results, stop trying mirrors and return
-            if out:
-                return out
+            # If we found data, we are done. Return it.
+            if out: return out
                 
         except Exception as e:
-            print(f"Monolith: Uplink to {mirror} failed: {e}")
+            print(f"Monolith: Link to {mirror} severed: {e}")
             continue
             
     return out
 
 @app.route("/")
 def home():
-    return "The Monolith is Online. Use the portable client."
+    return "The Monolith is Online."
 
 @app.route("/api/search")
 def search():
     q = request.args.get("q", "").strip()
     if not q: return jsonify({"error": "missing query"}), 400
 
-    print(f"Monolith: Initiating scan for '{q}'...")
+    print(f"Monolith: Global Scan initiated for '{q}'...")
     start_time = time.time()
 
     try:
         results = manual_search(q)
+        print(f"Monolith: Scan finished in {round(time.time() - start_time, 2)}s.")
         
-        print(f"Monolith: Scan complete in {round(time.time() - start_time, 2)}s.")
-        
-        if not results:
-            # If manual search failed, return empty list (not error) so frontend says "No results"
-            return jsonify([])
-
+        # Always return a list, even if empty (prevents frontend errors)
         return jsonify(results)
 
     except Exception as e:
-        print(f"Monolith: CRITICAL FAILURE -> {e}")
+        print(f"Monolith: FATAL ERROR -> {e}")
         return jsonify({"error": "Global scan failed.", "details": str(e)}), 500
 
 @app.route("/api/download", methods=["POST"])
 def download_book():
     data = request.json
-    # The 'url' here is likely http://library.lol/main/MD5...
-    # This page contains the ACTUAL download link (GET /)
     raw_url = data.get("url")
-    
     author = clean_text(data.get("author", "Unknown Author"))
     title = clean_text(data.get("title", "Unknown Title"))
     year = data.get("year", "")
@@ -168,44 +144,32 @@ def download_book():
     try:
         print(f"Monolith: Resolving gateway {raw_url}...")
         
-        # 1. We need to get the "GET" link from the library.lol page
-        # library.lol is a landing page, we need the link inside it that says "GET" or "Cloudflare"
-        r_gateway = requests.get(raw_url, timeout=15)
+        # 1. Resolve the "GET" link from library.lol
+        # We spoof the User-Agent to look like a real browser (fixes some blocks)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r_gateway = requests.get(raw_url, headers=headers, timeout=15)
         
-        # Regex to find the download link
-        # Usually: <a href="...">GET</a> or <h2><a href="...">Download</a></h2>
-        # Let's find the FIRST link that looks like a file download
-        
-        # library.lol structure usually has a link at the top
-        # We look for the 'href' inside the 'GET' link container
         link_pattern = r'<a href="(.*?)"'
         matches = re.findall(link_pattern, r_gateway.text)
         
         real_dl_url = None
         for m in matches:
-            # Clean up link
-            if not m.startswith("http"):
-                # sometimes links are relative
-                continue
-            # Usually the first http link is the main download
+            if not m.startswith("http"): continue
             real_dl_url = m
             break
             
         if not real_dl_url:
-            # Fallback: Just try the raw_url (unlikely to work for library.lol but worth a shot)
-            print("Monolith: Could not resolve direct link, trying raw...")
             real_dl_url = raw_url
 
         print(f"Monolith: Acquiring from {real_dl_url}...")
         
-        r_file = requests.get(real_dl_url, stream=True, timeout=300) # 5 min timeout for big files
+        r_file = requests.get(real_dl_url, headers=headers, stream=True, timeout=300)
         r_file.raise_for_status()
         
         with open(filepath, 'wb') as f:
             for chunk in r_file.iter_content(chunk_size=8192):
                 f.write(chunk)
                 
-        print("Monolith: Acquisition Complete.")
         return jsonify({"success": True, "filename": filename})
         
     except Exception as e:
