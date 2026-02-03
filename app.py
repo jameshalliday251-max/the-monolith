@@ -14,7 +14,7 @@ LIBRARY_PATH = os.path.join(os.getcwd(), "library")
 if not os.path.exists(LIBRARY_PATH):
     os.makedirs(LIBRARY_PATH)
 
-s = LibgenSearch(mirror="li")
+s = LibgenSearch()
 
 def clean_text(text):
     if not text: return "Unknown"
@@ -159,4 +159,5 @@ def serve_book(filename):
     return send_from_directory(LIBRARY_PATH, filename)
 
 if __name__ == "__main__":
+
     app.run(host="0.0.0.0", port=9696, debug=True)
