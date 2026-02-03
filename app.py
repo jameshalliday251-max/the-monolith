@@ -14,18 +14,20 @@ LIBRARY_PATH = "/app/library"
 if not os.path.exists(LIBRARY_PATH):
     os.makedirs(LIBRARY_PATH)
 
-# --- MIRRORS ---
+# --- MIRRORS (BLOCKADE RUNNER EDITION) ---
+# We now include direct IP addresses and alternative domains to bypass ISP filters.
 MIRRORS = [
-    "http://libgen.is",
-    "http://libgen.rs",
-    "http://libgen.st"
+    "http://libgen.is",          # Standard (Blocked by some)
+    "http://185.39.10.101",      # Direct IP (Bypasses DNS Block)
+    "http://libgen.rs",          # Backup
+    "http://libgen.st",          # Backup
+    "http://libgen.li"           # Alternative (Last resort)
 ]
 
-# --- STEALTH HEADERS (Pretends to be Chrome) ---
+# --- STEALTH HEADERS ---
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5'
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
 }
 
 def clean_text(text):
@@ -39,36 +41,20 @@ def clean_text(text):
 def home():
     return "The Monolith is Online. System Normal."
 
-# --- NEW: DIAGNOSTICS ENDPOINT ---
-# Visit https://book.oasis-archive.org/api/health to test connection
 @app.route("/api/health")
 def health_check():
-    report = {
-        "status": "online",
-        "internet_access": "unknown",
-        "libgen_connection": "unknown",
-        "errors": []
-    }
-    
-    # 1. Test Internet (Google)
+    report = {"status": "online", "internet": "unknown", "libgen": "unknown"}
     try:
         requests.get("http://www.google.com", timeout=3)
-        report["internet_access"] = "success"
-    except Exception as e:
-        report["internet_access"] = "failed"
-        report["errors"].append(f"Google Ping Failed: {str(e)}")
-
-    # 2. Test LibGen (Mirror 1)
+        report["internet"] = "success"
+    except: report["internet"] = "failed"
+    
+    # Try the IP mirror specifically for health check
     try:
-        r = requests.get(MIRRORS[0], headers=HEADERS, timeout=5)
-        if r.status_code == 200:
-            report["libgen_connection"] = "success"
-        else:
-            report["libgen_connection"] = f"failed_status_{r.status_code}"
+        r = requests.get("http://185.39.10.101", headers=HEADERS, timeout=5)
+        report["libgen"] = "success" if r.status_code == 200 else f"status_{r.status_code}"
     except Exception as e:
-        report["libgen_connection"] = "failed"
-        report["errors"].append(f"LibGen Ping Failed: {str(e)}")
-        
+        report["libgen"] = f"failed: {str(e)}"
     return jsonify(report)
 
 @app.route("/api/search")
@@ -76,15 +62,16 @@ def search():
     q = request.args.get("q", "").strip()
     if not q: return jsonify({"error": "missing query"}), 400
 
-    print(f"Monolith: Stealth Scan initiated for '{q}'...")
+    print(f"Monolith: Blockade Runner Scan for '{q}'...")
     
     out = []
     
-    # Try mirrors with Stealth Headers
     for mirror in MIRRORS:
         try:
+            print(f"Monolith: Pinging {mirror}...")
+            # Search URL
             search_url = f"{mirror}/search.php?req={q}&res=25&view=simple&phrase=1&column=def"
-            r = requests.get(search_url, headers=HEADERS, timeout=10)
+            r = requests.get(search_url, headers=HEADERS, timeout=8)
             
             if r.status_code != 200: continue
 
@@ -94,7 +81,7 @@ def search():
             
             if not md5s: continue
             
-            print(f"Monolith: Locked on {len(md5s)} artifacts via {mirror}...")
+            print(f"Monolith: Connection established via {mirror}.")
             
             # Fetch Metadata
             ids_to_check = ",".join(md5s[:15]) 
@@ -108,6 +95,7 @@ def search():
                 if ext not in ['pdf', 'epub']: continue
                 
                 md5 = item.get('md5')
+                # Use library.lol as primary gateway
                 dl_url = f"http://library.lol/main/{md5}"
                 
                 out.append({
@@ -122,7 +110,7 @@ def search():
             if out: return jsonify(out)
                 
         except Exception as e:
-            print(f"Monolith: Mirror {mirror} failed: {e}")
+            print(f"Monolith: {mirror} failed: {e}")
             continue
             
     return jsonify([])
