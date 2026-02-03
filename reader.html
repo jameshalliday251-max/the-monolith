@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Artifact Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+</script>
+
+<style>
+body { font-family: Georgia, serif; margin: 0; padding: 0; background: #09090b; color: #e4e4e7; transition: background 0.3s, color 0.3s; }
+
+/* Reader Container */
+#reader { width: 100%; height: 100vh; overflow-y: auto; padding: 20px 10px; box-sizing: border-box; font-size: 19px; line-height: 1.6; background: inherit; }
+#reader img { max-width: 100%; height: auto; display: block; margin: 12px auto; }
+/* PDF Canvas Style */
+.pdf-page { display: block; margin: 10px auto; max-width: 100%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+
+/* Menu Button */
+#menuBtn { position: fixed; top: 15px; right: 15px; z-index: 2000; font-size: 24px; background: rgba(9,9,11, 0.9); color: white; border: 1px solid #27272a; cursor: pointer; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display:flex; align-items:center; justify-content:center; }
+
+/* Menu Drawer */
+#menu { position: fixed; top: 70px; right: 15px; background: #09090b; border: 1px solid #27272a; border-radius: 16px; padding: 15px; display: none; flex-direction: column; gap: 10px; z-index: 1999; width: 220px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+
+/* Menu Items */
+#menu button, #menu a { width: 100%; padding: 12px; font-size: 14px; border-radius: 8px; background: #18181b; color: #e4e4e7; text-align: center; font-weight: 600; border: 1px solid #27272a; text-decoration: none; display: block; box-sizing: border-box; cursor: pointer; text-transform: uppercase;}
+#menu button:hover, #menu a:hover { border-color: #3b82f6; color: white; }
+
+/* Action Group */
+.action-group { display: flex; gap: 10px; }
+.action-group button { flex: 1; font-size: 12px; }
+
+#fileName { font-size: 12px; text-align: center; color: #71717a; margin-bottom: 5px; font-weight: bold; word-break: break-word; text-transform: uppercase; letter-spacing: 1px;}
+</style>
+</head>
+<body>
+
+<button id="menuBtn">☰</button>
+
+<div id="menu">
+  <a href="/">← Return to Archives</a>
+  <div id="fileName">Loading Artifact...</div>
+  
+  <div class="action-group">
+    <button onclick="downloadBook()">Export</button>
+    <button onclick="renameBook()">Rename</button>
+  </div>
+  
+  <div class="action-group">
+      <button id="decrease">Size -</button>
+      <button id="increase">Size +</button>
+  </div>
+</div>
+
+<div id="reader">Loading...</div>
+
+<script>
+let zip = null;
+let chapters = [];
+let fontSize = 19;
+let currentFilename = ""; 
+let currentTitle = "";
+let currentUrl = "";
+
+const reader = document.getElementById('reader');
+const menu = document.getElementById('menu');
+const menuBtn = document.getElementById('menuBtn');
+const fileNameDisplay = document.getElementById('fileName');
+
+menuBtn.addEventListener('click', ()=>{ menu.style.display = menu.style.display==='flex'?'none':'flex'; });
+
+window.addEventListener('load', async () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    currentUrl = urlParams.get('book'); 
+    currentTitle = urlParams.get('title') || "Unknown Artifact";
+    currentFilename = currentUrl.replace(/^\/files\//, "");
+
+    fileNameDisplay.textContent = currentTitle;
+
+    if (currentUrl) {
+        try {
+            fileNameDisplay.textContent = "Decrypting...";
+            const isPdf = currentUrl.toLowerCase().endsWith('.pdf');
+            
+            if (isPdf) {
+                await loadPdf(currentUrl);
+            } else {
+                const response = await fetch(currentUrl);
+                if (!response.ok) throw new Error("Network response was not ok");
+                const arrayBuffer = await response.arrayBuffer();
+                await loadEpubFromBuffer(new Uint8Array(arrayBuffer));
+            }
+            fileNameDisplay.textContent = currentTitle;
+        } catch (err) { 
+            reader.innerHTML = `<div style="text-align:center; margin-top:50px; color:#ef4444;">Artifact Corrupted.<br>${err.message}</div>`; 
+        }
+    } else { reader.innerHTML = "No artifact selected."; }
+});
+
+// --- RENAME & DOWNLOAD ---
+function downloadBook() {
+    const a = document.createElement('a');
+    a.href = currentUrl;
+    a.download = currentTitle;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+async function renameBook() {
+    const newTitle = prompt("Enter new designation for artifact:", currentTitle);
+    if (!newTitle || newTitle === currentTitle) return;
+
+    try {
+        const res = await fetch('/api/rename', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                filename: decodeURIComponent(currentFilename),
+                new_title: newTitle
+            })
+        });
+        
+        const data = await res.json();
+        
+        if (data.success) {
+            alert("Designation updated.");
+            currentTitle = data.new_title;
+            currentFilename = data.new_filename;
+            currentUrl = `/files/${currentFilename}`;
+            fileNameDisplay.textContent = currentTitle;
+            
+            const newUrl = new URL(window.location);
+            newUrl.searchParams.set('book', currentUrl);
+            newUrl.searchParams.set('title', currentTitle);
+            window.history.pushState({}, '', newUrl);
+        } else { alert("Error: " + data.error); }
+    } catch(e) { alert("Uplink failed."); }
+}
+
+// --- PDF LOGIC ---
+async function loadPdf(url) {
+    reader.innerHTML = ''; 
+    const loadingTask = pdfjsLib.getDocument(url);
+    const pdf = await loadingTask.promise;
+    
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const viewportUnscaled = page.getViewport({scale: 1});
+        const containerWidth = reader.clientWidth - 40;
+        const scale = containerWidth / viewportUnscaled.width;
+        const viewport = page.getViewport({scale: scale > 2 ? 2 : scale});
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'pdf-page';
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        
+        const renderContext = { canvasContext: canvas.getContext('2d'), viewport: viewport };
+        await page.render(renderContext).promise;
+        reader.appendChild(canvas);
+    }
+}
+
+// --- EPUB LOGIC ---
+async function loadEpubFromBuffer(buffer){
+  try {
+    zip = await JSZip.loadAsync(buffer);
+    chapters = await getChaptersInOrder();
+    reader.innerHTML = ''; 
+    for(let c of chapters){
+      try {
+        const content = await zip.files[c].async('string');
+        const div = document.createElement('div');
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(content, "text/html");
+        doc.querySelectorAll('style, link[rel="stylesheet"]').forEach(el => el.remove());
+        div.innerHTML = doc.body.innerHTML;
+        reader.appendChild(div);
+        await fixImages(div);
+      } catch(err){ }
+    }
+    scaleImages();
+  } catch(e) { alert("Parsing Error."); }
+}
+
+async function fixImages(div) {
+  const imgs = div.querySelectorAll('img');
+  for (let img of imgs) {
+    let src = img.getAttribute('src');
+    if (!src || src.startsWith('data:')) continue;
+    const path = resolvePathFromChapter(div, src);
+    if (zip.files[path]) {
+      try {
+        const fileData = await zip.files[path].async('base64');
+        let mime = path.endsWith('.png') ? 'image/png' : 'image/jpeg';
+        img.src = `data:${mime};base64,${fileData}`;
+      } catch(err) {}
+    }
+  }
+}
+
+function scaleImages(){
+  const imgs = reader.querySelectorAll('img');
+  imgs.forEach(img => {
+    img.style.maxWidth = '100%'; img.style.height = 'auto'; img.style.maxHeight = '80vh'; img.style.objectFit = 'contain';
+  });
+}
+
+function resolvePathFromChapter(chapterDiv, imgSrc){
+  let chapterIndex = Array.from(reader.children).indexOf(chapterDiv);
+  if(chapterIndex === -1) return imgSrc;
+  return resolvePath(chapters[chapterIndex], imgSrc);
+}
+
+function resolvePath(base, rel){
+  const p = base.split('/').slice(0,-1);
+  rel.split('/').forEach(r => { if(r === '..') p.pop(); else if(r !== '.') p.push(r); });
+  return p.join('/');
+}
+
+async function getChaptersInOrder() {
+  const opfFile = Object.keys(zip.files).find(f => f.endsWith('.opf'));
+  if(!opfFile) return Object.keys(zip.files).filter(f => f.endsWith('.html')||f.endsWith('.xhtml'));
+  try {
+    const opfContent = await zip.files[opfFile].async('string');
+    const xml = new DOMParser().parseFromString(opfContent,'application/xml');
+    const items = {};
+    xml.querySelectorAll('manifest item').forEach(i => items[i.getAttribute('id')] = i.getAttribute('href'));
+    const spine = [];
+    xml.querySelectorAll('spine itemref').forEach(r => {
+      const href = items[r.getAttribute('idref')];
+      if (href) spine.push(resolvePath(opfFile, href));
+    });
+    return spine;
+  } catch(e){ return Object.keys(zip.files).filter(f => f.endsWith('.html')||f.endsWith('.xhtml')); }
+}
+
+document.getElementById('increase').onclick=()=>{fontSize+=2;reader.style.fontSize=fontSize+'px';scaleImages();}
+document.getElementById('decrease').onclick=()=>{if(fontSize>12){fontSize-=2;reader.style.fontSize=fontSize+'px';scaleImages();}}
+</script>
+</body>
+</html>
