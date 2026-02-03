@@ -15,25 +15,20 @@ LIBRARY_PATH = "/app/library"
 if not os.path.exists(LIBRARY_PATH):
     os.makedirs(LIBRARY_PATH)
 
-# --- SCORCHED EARTH MIRROR LIST ---
-# We are throwing everything at the wall.
-# Different domains run on different servers/countries.
+# --- MIRRORS ---
+# CRITICAL UPDATE: We prioritize .lc because diagnostics confirmed it is OPEN.
+# We removed blocked mirrors to speed up the scan.
 MIRRORS = [
-    "http://libgen.li",          # Different network (often unblocked)
-    "http://libgen.gs",          # Alternative
-    "http://libgen.lc",          # Alternative
-    "http://libgen.is",          # Standard
-    "http://libgen.rs",          # Standard
-    "http://libgen.st",          # Standard
-    "http://185.39.10.101",      # Direct IP 1
-    "http://62.182.86.140",      # Direct IP 2
+    "http://libgen.lc",          # CONFIRMED WORKING
+    "http://libgen.li",          # CONFIRMED WORKING
+    "http://libgen.is",          # Backup
+    "http://libgen.rs",          # Backup
 ]
 
 # --- STEALTH AGENTS ---
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15'
 ]
 
 def get_headers():
@@ -51,29 +46,22 @@ def clean_text(text):
 
 @app.route("/")
 def home():
-    return "The Monolith is Online. Scorched Earth Protocol Active."
+    return "The Monolith is Online. LC-Protocol Active."
 
 @app.route("/api/health")
 def health_check():
     report = {"status": "online", "internet": "unknown", "mirrors": {}}
-    
-    # 1. Check Internet
     try:
         requests.get("http://www.google.com", timeout=3)
         report["internet"] = "success"
     except: report["internet"] = "failed"
 
-    # 2. Check ALL Mirrors to see which one works
     for m in MIRRORS:
         try:
             r = requests.get(m, headers=get_headers(), timeout=3)
-            if r.status_code == 200:
-                report["mirrors"][m] = "success"
-            else:
-                report["mirrors"][m] = f"status_{r.status_code}"
-        except Exception as e:
+            report["mirrors"][m] = "success" if r.status_code == 200 else f"status_{r.status_code}"
+        except:
             report["mirrors"][m] = "blocked"
-            
     return jsonify(report)
 
 @app.route("/api/search")
@@ -81,21 +69,20 @@ def search():
     q = request.args.get("q", "").strip()
     if not q: return jsonify({"error": "missing query"}), 400
 
-    print(f"Monolith: Scanning for '{q}'...")
+    print(f"Monolith: Scanning via Open Channels for '{q}'...")
     
     out = []
     
-    # Try every mirror until one works
     for mirror in MIRRORS:
         try:
             print(f"Monolith: Pinging {mirror}...")
-            # Use basic search parameters
+            # Search
             search_url = f"{mirror}/search.php?req={q}&res=25&view=simple&column=def"
-            r = requests.get(search_url, headers=get_headers(), timeout=6)
+            r = requests.get(search_url, headers=get_headers(), timeout=8)
             
             if r.status_code != 200: continue
 
-            # Regex for MD5 (Captures standard and .li formats)
+            # Regex for MD5
             md5_pattern = r'md5=([A-Fa-f0-9]{32})'
             md5s = list(set(re.findall(md5_pattern, r.text)))
             
@@ -103,26 +90,24 @@ def search():
             
             print(f"Monolith: Lock on via {mirror}. Found {len(md5s)} artifacts.")
             
-            # ATTEMPT METADATA FETCH
-            # We try to use the JSON API from a "Standard" mirror (like .rs) 
-            # because it gives the best data, even if we found the ID on a different mirror.
-            data = []
+            # --- CRITICAL FIX: USE THE WORKING MIRROR FOR DATA ---
+            # Previous version tried to use .rs (blocked) for this step.
+            # Now we use the mirror that we KNOW is working (mirror variable).
+            
+            ids = ",".join(md5s[:15])
+            # .lc supports the json API! We use it.
+            meta_url = f"{mirror}/json.php?ids={ids}&fields=id,title,author,year,extension,md5,filesize"
+            
+            # If we are on .li, the JSON API might be broken/different.
+            # Fallback to .lc if we are on .li
+            if "libgen.li" in mirror:
+                 meta_url = f"http://libgen.lc/json.php?ids={ids}&fields=id,title,author,year,extension,md5,filesize"
+
             try:
-                ids = ",".join(md5s[:15])
-                # We use .rs for metadata because it has the best API. 
-                # If .rs is blocked, we will fall back to basic scraping (implied).
-                meta_url = f"http://libgen.rs/json.php?ids={ids}&fields=id,title,author,year,extension,md5,filesize"
-                meta_r = requests.get(meta_url, headers=get_headers(), timeout=5)
+                meta_r = requests.get(meta_url, headers=get_headers(), timeout=10)
                 data = meta_r.json()
             except:
-                print("Monolith: Metadata API blocked. Trying .li alternate API...")
-                # Fallback would go here, but for now we skip to avoid complexity.
-                # If we have MD5s but no metadata, we can't show them easily.
-                # Let's hope .rs API is accessible via the Google DNS you added.
-                pass
-
-            if not data:
-                print("Monolith: Could not fetch metadata. Skipping mirror.")
+                print(f"Monolith: Metadata fetch failed on {mirror}. Trying next.")
                 continue
 
             for item in data:
@@ -130,7 +115,6 @@ def search():
                 if ext not in ['pdf', 'epub']: continue
                 
                 md5 = item.get('md5')
-                # Use library.lol as primary gateway
                 dl_url = f"http://library.lol/main/{md5}"
                 
                 out.append({
@@ -172,7 +156,7 @@ def download_book():
         return jsonify({"message": "Artifact already exists", "filename": filename})
 
     try:
-        # Resolve Gateway
+        # Resolve Gateway (library.lol is usually unblocked even if search is blocked)
         r_gateway = requests.get(raw_url, headers=get_headers(), timeout=15)
         link_pattern = r'<a href="(.*?)"'
         matches = re.findall(link_pattern, r_gateway.text)
