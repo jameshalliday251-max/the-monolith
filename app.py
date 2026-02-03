@@ -16,13 +16,12 @@ if not os.path.exists(LIBRARY_PATH):
     os.makedirs(LIBRARY_PATH)
 
 # --- MIRRORS ---
-# CRITICAL UPDATE: We prioritize .lc because diagnostics confirmed it is OPEN.
-# We removed blocked mirrors to speed up the scan.
+# We prioritize .li now as .lc might be serving a captcha page
 MIRRORS = [
-    "http://libgen.lc",          # CONFIRMED WORKING
-    "http://libgen.li",          # CONFIRMED WORKING
-    "http://libgen.is",          # Backup
-    "http://libgen.rs",          # Backup
+    "http://libgen.li",          # Often less protected
+    "http://libgen.lc",          # Open but tricky
+    "http://libgen.is",          # Blocked by ISP?
+    "http://libgen.rs",          # Blocked by ISP?
 ]
 
 # --- STEALTH AGENTS ---
@@ -46,21 +45,16 @@ def clean_text(text):
 
 @app.route("/")
 def home():
-    return "The Monolith is Online. LC-Protocol Active."
+    return "The Monolith is Online. Blindfire Protocol."
 
 @app.route("/api/health")
 def health_check():
-    report = {"status": "online", "internet": "unknown", "mirrors": {}}
-    try:
-        requests.get("http://www.google.com", timeout=3)
-        report["internet"] = "success"
-    except: report["internet"] = "failed"
-
+    report = {"status": "online", "mirrors": {}}
     for m in MIRRORS:
         try:
-            r = requests.get(m, headers=get_headers(), timeout=3)
+            r = requests.get(m, headers=get_headers(), timeout=5, verify=False)
             report["mirrors"][m] = "success" if r.status_code == 200 else f"status_{r.status_code}"
-        except:
+        except Exception as e:
             report["mirrors"][m] = "blocked"
     return jsonify(report)
 
@@ -69,63 +63,72 @@ def search():
     q = request.args.get("q", "").strip()
     if not q: return jsonify({"error": "missing query"}), 400
 
-    print(f"Monolith: Scanning via Open Channels for '{q}'...")
+    print(f"Monolith: Blindfire Scan for '{q}'...")
     
     out = []
     
     for mirror in MIRRORS:
         try:
             print(f"Monolith: Pinging {mirror}...")
-            # Search
+            # Use basic search parameters
             search_url = f"{mirror}/search.php?req={q}&res=25&view=simple&column=def"
-            r = requests.get(search_url, headers=get_headers(), timeout=8)
+            r = requests.get(search_url, headers=get_headers(), timeout=8, verify=False)
             
             if r.status_code != 200: continue
 
-            # Regex for MD5
+            # Regex for MD5 (Captures standard and .li formats)
+            # We look for ANY 32-char hex string preceded by 'md5='
             md5_pattern = r'md5=([A-Fa-f0-9]{32})'
             md5s = list(set(re.findall(md5_pattern, r.text)))
             
-            if not md5s: continue
+            if not md5s:
+                print(f"Monolith: Connected to {mirror} but found 0 MD5s. (Possibly captcha page?)")
+                continue
             
             print(f"Monolith: Lock on via {mirror}. Found {len(md5s)} artifacts.")
             
-            # --- CRITICAL FIX: USE THE WORKING MIRROR FOR DATA ---
-            # Previous version tried to use .rs (blocked) for this step.
-            # Now we use the mirror that we KNOW is working (mirror variable).
+            # --- BLINDFIRE METADATA FETCH ---
+            # Try to get data. If it fails, RETURN THE MD5 ANYWAY.
             
             ids = ",".join(md5s[:15])
-            # .lc supports the json API! We use it.
-            meta_url = f"{mirror}/json.php?ids={ids}&fields=id,title,author,year,extension,md5,filesize"
             
-            # If we are on .li, the JSON API might be broken/different.
-            # Fallback to .lc if we are on .li
-            if "libgen.li" in mirror:
-                 meta_url = f"http://libgen.lc/json.php?ids={ids}&fields=id,title,author,year,extension,md5,filesize"
-
+            # Try to use .lc API for metadata because it's usually standard
+            meta_url = f"http://libgen.lc/json.php?ids={ids}&fields=id,title,author,year,extension,md5,filesize"
+            
             try:
-                meta_r = requests.get(meta_url, headers=get_headers(), timeout=10)
-                data = meta_r.json()
-            except:
-                print(f"Monolith: Metadata fetch failed on {mirror}. Trying next.")
-                continue
+                meta_r = requests.get(meta_url, headers=get_headers(), timeout=6, verify=False)
+                if meta_r.status_code == 200:
+                    data = meta_r.json()
+                    
+                    # Process clean data
+                    for item in data:
+                        ext = item.get('extension', '').lower()
+                        if ext not in ['pdf', 'epub']: continue
+                        md5 = item.get('md5')
+                        out.append({
+                            "title": clean_text(item.get('title')),
+                            "author": clean_text(item.get('author')),
+                            "year": item.get('year'),
+                            "extension": ext,
+                            "size": item.get('filesize'),
+                            "download_url": f"http://library.lol/main/{md5}"
+                        })
+                else:
+                    raise Exception("API status not 200")
 
-            for item in data:
-                ext = item.get('extension', '').lower()
-                if ext not in ['pdf', 'epub']: continue
-                
-                md5 = item.get('md5')
-                dl_url = f"http://library.lol/main/{md5}"
-                
-                out.append({
-                    "title": clean_text(item.get('title')),
-                    "author": clean_text(item.get('author')),
-                    "year": item.get('year'),
-                    "extension": ext,
-                    "size": item.get('filesize'),
-                    "download_url": dl_url
-                })
-            
+            except Exception as e:
+                print(f"Monolith: Metadata fetch failed ({e}). Engaging Blind Mode.")
+                # FALLBACK: Return raw MD5s so user can still download
+                for m in md5s[:15]:
+                    out.append({
+                        "title": "Unknown Artifact (Click to Retrieve)",
+                        "author": "System",
+                        "year": "????",
+                        "extension": "pdf",
+                        "size": "??",
+                        "download_url": f"http://library.lol/main/{m}"
+                    })
+
             if out: return jsonify(out)
                 
         except Exception as e:
@@ -156,8 +159,8 @@ def download_book():
         return jsonify({"message": "Artifact already exists", "filename": filename})
 
     try:
-        # Resolve Gateway (library.lol is usually unblocked even if search is blocked)
-        r_gateway = requests.get(raw_url, headers=get_headers(), timeout=15)
+        # Resolve Gateway
+        r_gateway = requests.get(raw_url, headers=get_headers(), timeout=15, verify=False)
         link_pattern = r'<a href="(.*?)"'
         matches = re.findall(link_pattern, r_gateway.text)
         
@@ -168,7 +171,7 @@ def download_book():
                 break
 
         print(f"Monolith: Downloading from {real_dl_url}...")
-        r_file = requests.get(real_dl_url, headers=get_headers(), stream=True, timeout=300)
+        r_file = requests.get(real_dl_url, headers=get_headers(), stream=True, timeout=300, verify=False)
         r_file.raise_for_status()
         
         with open(filepath, 'wb') as f:
